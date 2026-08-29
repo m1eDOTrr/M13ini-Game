@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Flappy Bird + Wave (все кнопки работают)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+            touch-action: none;
+        }
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            box-shadow: 0 0 30px rgba(0,0,0,0.7);
+            border-radius: 8px;
+        }
+        .info {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 18px;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="1920" height="1080"></canvas>
+    <div class="info">ЛКМ / Пробел / ↑ — действие, P/Esc — пауза</div>
+
+    <script>
+        (function() {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+
+            // Логические размеры
+            const LOGICAL_WIDTH = 1920;
+            const LOGICAL_HEIGHT = 1080;
+
+            // Игровые параметры
+            const BIRD_RADIUS = 40;
+            const BIRD_X = 300;
+            const GROUND_HEIGHT = 120;
+            const GROUND_Y = LOGICAL_HEIGHT - GROUND_HEIGHT;
+            const PIPE_WIDTH = 160;
+            const PIPE_MIN_TOP = 80;
+
+            const BASE_GRAVITY = 0.18;
+            const BASE_JUMP_STRENGTH = -6.0;
+
+            // Настройки сложности (физика UFO не меняется)
+            const DIFFICULTIES = {
+                easy:   { pipeGap: 420, pipeSpeed: 4.0, pipeInterval: 160, waveSpeed: 9.0, speedPortals: false },
+                normal: { pipeGap: 360, pipeSpeed: 5.0, pipeInterval: 130, waveSpeed: 10.0, speedPortals: true },
+                hard:   { pipeGap: 260, pipeSpeed: 6.0, pipeInterval: 110, waveSpeed: 11.0, speedPortals: true }
+            };
+
+            let difficulty = 'normal';
+            let PIPE_GAP = DIFFICULTIES.normal.pipeGap;
+            let PIPE_SPEED = DIFFICULTIES.normal.pipeSpeed;
+            let PIPE_INTERVAL = DIFFICULTIES.normal.pipeInterval;
+            let GRAVITY = BASE_GRAVITY;
+            let JUMP_STRENGTH = BASE_JUMP_STRENGTH;
+            let WAVE_SPEED = DIFFICULTIES.normal.waveSpeed;
+
+            // Пользовательские настройки физики UFO
+            let customGravity = BASE_GRAVITY;
+            let customJumpStrength = BASE_JUMP_STRENGTH;
+
+            // Состояние
+            let gameState = 'menu'; // menu, playing, paused, gameover, settings
+            let selectedMode = 'classic'; // classic, ufo, wave
+            let gameMode = 'ufo';
+            let score = 0;
+            let bestScore = parseInt(localStorage.getItem('bestScore')) || 0;
+            let birdY = LOGICAL_HEIGHT / 2;
+            let birdVelocity = 0;
+            let pipes = [];
+            let frameCount = 0;
+            let pipeSpawnCounter = 0;
+            let isHolding = false;
+            let waveAngle = 0;
+            let targetWaveAngle = 0;
+            let waveTrail = [];
+            let clouds = [];
+            let groundOffset = 0;
+            let modeMessage = '';
+            let messageTimer = 0;
+            let currentSpeedMultiplier = 1.0;
+            let lastSpeedPortalType = null;
+
+            // Настройки
+            let soundEnabled = true;
+            let vibrationEnabled = true;
+            let audioCtx = null;
+
+            // Цвета
+            const COLOR_PALETTE = ['#FFB300', '#FF5722', '#4CAF50', '#2196F3', '#9C27B0', '#FFFFFF'];
+            let ufoColor = '#FFB300';
+            let waveColor = '#2196F3';
+            let trailColor = '#2196F3';
+            let colorIndexUfo = 0;
+            let colorIndexWave = 1;
+            let colorIndexTrail = 1;
+
+            // Ширина трейла
+            let trailWidth = 20;
+
+            // Кнопка паузы
+            const pauseButton = {
+                x: LOGICAL_WIDTH - 100,
+                y: 30,
+                width: 70,
+                height: 70
+            };
+
+            // Инициализация облаков
+            for (let i = 0; i < 8; i++) {
+                clouds.push({
+                    x: Math.random() * LOGICAL_WIDTH,
+                    y: Math.random() * 400 + 50,
+                    width: Math.random() * 250 + 100,
+                    speed: Math.random() * 1.5 + 0.5
+                });
+            }
+
+            function applyDifficulty(diff) {
+                difficulty = diff;
+                const s = DIFFICULTIES[diff];
+                PIPE_GAP = s.pipeGap;
+                PIPE_SPEED = s.pipeSpeed;
+                PIPE_INTERVAL = s.pipeInterval;
+                WAVE_SPEED = s.waveSpeed;
+                currentSpeedMultiplier = 1.0;
+                lastSpeedPortalType = null;
+            }
+
+            function resetGame() {
+                birdY = LOGICAL_HEIGHT / 2;
+                birdVelocity = 0;
+                pipes = [];
+                score = 0;
+                frameCount = 0;
+                pipeSpawnCounter = 0;
+                isHolding = false;
+                waveAngle = 0;
+                targetWaveAngle = 0;
+                waveTrail = [];
+                modeMessage = '';
+                messageTimer = 0;
+                currentSpeedMultiplier = 1.0;
+                lastSpeedPortalType = null;
+                gameState = 'playing';
+                if (selectedMode === 'classic') {
+                    gameMode = 'ufo';
+                } else {
+                    gameMode = selectedMode;
+                }
+            }
+
+            function playSound(freq = 440, duration = 0.1, type = 'square') {
+                if (!soundEnabled) return;
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = type;
+                osc.frequency.value = freq;
+                gain.gain.value = 0.15;
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+                osc.stop(audioCtx.currentTime + duration);
+            }
+
+            function vibrate(pattern = 50) {
+                if (vibrationEnabled && navigator.vibrate) navigator.vibrate(pattern);
+            }
+
+            function switchMode() {
+                if (gameMode === 'ufo') {
+                    gameMode = 'wave';
+                    modeMessage = 'WAVE MODE';
+                } else {
+                    gameMode = 'ufo';
+                    modeMessage = 'UFO MODE';
+                }
+                messageTimer = 120;
+                birdVelocity = 0;
+                waveAngle = 0;
+                targetWaveAngle = 0;
+                isHolding = false;
+                waveTrail = [];
+                playSound(600, 0.15, 'sawtooth');
+            }
+
+            // Спавн трубы с возможными порталами
+            function spawnPipe() {
+                const minTop = PIPE_MIN_TOP;
+                const maxTop = GROUND_Y - PIPE_GAP - PIPE_MIN_TOP;
+                const topHeight = Math.random() * (maxTop - minTop) + minTop;
+                let newPipe = {
+                    x: LOGICAL_WIDTH,
+                    topHeight,
+                    bottomY: topHeight + PIPE_GAP,
+                    passed: false,
+                    modePortal: null,
+                    speedPortal: null
+                };
+                if (pendingModePortal) {
+                    newPipe.modePortal = { type: 'mode' };
+                    pendingModePortal = false;
+                }
+                if (pendingSpeedPortal) {
+                    let type;
+                    const types = ['1', '2', '3', '-1'];
+                    if (lastSpeedPortalType === null) {
+                        type = types[Math.floor(Math.random() * types.length)];
+                    } else {
+                        const available = types.filter(t => t !== lastSpeedPortalType);
+                        type = available[Math.floor(Math.random() * available.length)];
+                    }
+                    lastSpeedPortalType = type;
+                    newPipe.speedPortal = { type: type };
+                    pendingSpeedPortal = false;
+                }
+                pipes.push(newPipe);
+            }
+
+            let pendingModePortal = false;
+            let pendingSpeedPortal = false;
+
+            function update() {
+                if (gameState !== 'playing') return;
+
+                const effectivePipeSpeed = PIPE_SPEED * currentSpeedMultiplier;
+
+                if (gameMode === 'ufo') {
+                    birdVelocity += GRAVITY;
+                    birdY += birdVelocity;
+                } else { // wave
+                    let verticalSpeed = effectivePipeSpeed;
+                    if (isHolding) {
+                        birdY -= verticalSpeed;
+                    } else {
+                        birdY += verticalSpeed;
+                    }
+                    targetWaveAngle = isHolding ? -Math.PI / 4 : Math.PI / 4;
+                    waveAngle += (targetWaveAngle - waveAngle) * 0.15;
+
+                    // Трейл: точка точно на позиции игрока
+                    waveTrail.push({ x: BIRD_X, y: birdY });
+                    if (waveTrail.length > 200) waveTrail.shift();
+                }
+
+                // Границы
+                if (birdY - BIRD_RADIUS < 0) {
+                    birdY = BIRD_RADIUS;
+                    if (gameMode === 'ufo') birdVelocity = 0;
+                    if (gameMode === 'wave') { waveAngle = 0; targetWaveAngle = 0; waveTrail = []; }
+                }
+                if (birdY + BIRD_RADIUS > GROUND_Y) {
+                    birdY = GROUND_Y - BIRD_RADIUS;
+                    if (gameMode === 'ufo') birdVelocity = 0;
+                    if (gameMode === 'wave') { waveAngle = 0; targetWaveAngle = 0; waveTrail = []; }
+                }
+
+                pipeSpawnCounter++;
+                if (pipeSpawnCounter >= PIPE_INTERVAL) {
+                    spawnPipe();
+                    pipeSpawnCounter = 0;
+                }
+
+                for (let i = pipes.length - 1; i >= 0; i--) {
+                    const pipe = pipes[i];
+                    pipe.x -= effectivePipeSpeed;
+
+                    const hitboxWidth = PIPE_WIDTH * 0.95;
+                    const hitboxOffsetX = (PIPE_WIDTH - hitboxWidth) / 2;
+                    const pipeLeft = pipe.x + hitboxOffsetX;
+                    const pipeRight = pipe.x + hitboxOffsetX + hitboxWidth;
+                    const birdLeft = BIRD_X - BIRD_RADIUS;
+                    const birdRight = BIRD_X + BIRD_RADIUS;
+                    const birdTop = birdY - BIRD_RADIUS;
+                    const birdBottom = birdY + BIRD_RADIUS;
+
+                    const topHitboxBottom = pipe.topHeight * 0.95;
+                    if (birdRight > pipeLeft && birdLeft < pipeRight && birdTop < topHitboxBottom) {
+                        gameOver();
+                        return;
+                    }
+                    const bottomHitboxTop = pipe.bottomY + (GROUND_Y - pipe.bottomY) * 0.05;
+                    if (birdRight > pipeLeft && birdLeft < pipeRight && birdBottom > bottomHitboxTop) {
+                        gameOver();
+                        return;
+                    }
+
+                    if (!pipe.passed && pipe.x + PIPE_WIDTH < BIRD_X - BIRD_RADIUS) {
+                        pipe.passed = true;
+                        score++;
+                        playSound(700, 0.08, 'sine');
+                        if (selectedMode === 'classic' && score % 10 === 0) {
+                            pendingModePortal = true;
+                        }
+                        if (difficulty !== 'easy' && score % 20 === 0) {
+                            pendingSpeedPortal = true;
+                        }
+                    }
+
+                    if (pipe.modePortal) {
+                        const centerX = pipe.x + PIPE_WIDTH / 2;
+                        const centerY = pipe.topHeight + PIPE_GAP / 2;
+                        const rx = 70;
+                        const ry = PIPE_GAP / 2 - 10;
+                        const dx = BIRD_X - centerX;
+                        const dy = birdY - centerY;
+                        if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1) {
+                            switchMode();
+                            pipe.modePortal = null;
+                        }
+                    }
+
+                    if (pipe.speedPortal) {
+                        const centerX = pipe.x + PIPE_WIDTH / 2;
+                        const centerY = pipe.topHeight + PIPE_GAP / 2;
+                        const rx = 70;
+                        const ry = PIPE_GAP / 2 - 10;
+                        const dx = BIRD_X - centerX;
+                        const dy = birdY - centerY;
+                        if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1) {
+                            switch (pipe.speedPortal.type) {
+                                case '1': currentSpeedMultiplier = 1.0; break;
+                                case '2': currentSpeedMultiplier = 1.15; break;
+                                case '3': currentSpeedMultiplier = 1.3; break;
+                                case '-1': currentSpeedMultiplier = 0.7; break;
+                            }
+                            pipe.speedPortal = null;
+                            playSound(900, 0.1, 'triangle');
+                        }
+                    }
+
+                    if (pipe.x + PIPE_WIDTH < 0) {
+                        pipes.splice(i, 1);
+                    }
+                }
+
+                // Сдвиг трейла влево
+                for (let point of waveTrail) point.x -= effectivePipeSpeed;
+                waveTrail = waveTrail.filter(p => p.x > -50);
+
+                groundOffset = (groundOffset + effectivePipeSpeed) % 60;
+                clouds.forEach(cloud => {
+                    cloud.x -= cloud.speed;
+                    if (cloud.x + cloud.width < 0) {
+                        cloud.x = LOGICAL_WIDTH + 50;
+                        cloud.y = Math.random() * 400 + 50;
+                    }
+                });
+
+                if (messageTimer > 0) {
+                    messageTimer--;
+                    if (messageTimer === 0) modeMessage = '';
+                }
+            }
+
+            function gameOver() {
+                gameState = 'gameover';
+                playSound(200, 0.3, 'sawtooth');
+                vibrate(100);
+                if (score > bestScore) {
+                    bestScore = score;
+                    localStorage.setItem('bestScore', bestScore);
+                }
+            }
+
+            // ---------- РИСОВАНИЕ ----------
+            function drawSky() {
+                const gradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+                gradient.addColorStop(0, '#4ec0ca');
+                gradient.addColorStop(0.7, '#a8e6cf');
+                gradient.addColorStop(1, '#d4f4dd');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, LOGICAL_WIDTH, GROUND_Y);
+            }
+
+            function drawClouds() {
+                ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                clouds.forEach(cloud => {
+                    ctx.beginPath();
+                    ctx.arc(cloud.x, cloud.y, cloud.width * 0.3, 0, Math.PI * 2);
+                    ctx.arc(cloud.x + cloud.width * 0.3, cloud.y - cloud.width * 0.15, cloud.width * 0.25, 0, Math.PI * 2);
+                    ctx.arc(cloud.x + cloud.width * 0.6, cloud.y, cloud.width * 0.28, 0, Math.PI * 2);
+                    ctx.arc(cloud.x + cloud.width * 0.3, cloud.y + cloud.width * 0.15, cloud.width * 0.3, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            }
+
+            function drawPipes() {
+                pipes.forEach(pipe => {
+                    let gradient = ctx.createLinearGradient(pipe.x, 0, pipe.x + PIPE_WIDTH, 0);
+                    gradient.addColorStop(0, '#6ab04c');
+                    gradient.addColorStop(0.5, '#8bc34a');
+                    gradient.addColorStop(1, '#5a9e3e');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.topHeight);
+                    ctx.fillStyle = '#3e7a20';
+                    ctx.fillRect(pipe.x - 8, pipe.topHeight - 50, PIPE_WIDTH + 16, 50);
+                    ctx.fillStyle = '#8bc34a';
+                    ctx.fillRect(pipe.x - 8, pipe.topHeight - 50, PIPE_WIDTH + 16, 10);
+                    ctx.fillStyle = '#2e5d18';
+                    ctx.fillRect(pipe.x - 8, pipe.topHeight - 10, PIPE_WIDTH + 16, 10);
+
+                    gradient = ctx.createLinearGradient(pipe.x, pipe.bottomY, pipe.x + PIPE_WIDTH, pipe.bottomY);
+                    gradient.addColorStop(0, '#6ab04c');
+                    gradient.addColorStop(0.5, '#8bc34a');
+                    gradient.addColorStop(1, '#5a9e3e');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(pipe.x, pipe.bottomY, PIPE_WIDTH, GROUND_Y - pipe.bottomY);
+                    ctx.fillStyle = '#3e7a20';
+                    ctx.fillRect(pipe.x - 8, pipe.bottomY, PIPE_WIDTH + 16, 50);
+                    ctx.fillStyle = '#8bc34a';
+                    ctx.fillRect(pipe.x - 8, pipe.bottomY, PIPE_WIDTH + 16, 10);
+                    ctx.fillStyle = '#2e5d18';
+                    ctx.fillRect(pipe.x - 8, pipe.bottomY + 40, PIPE_WIDTH + 16, 10);
+
+                    if (pipe.modePortal) drawModePortal(pipe);
+                    if (pipe.speedPortal) drawSpeedPortal(pipe);
+
+                    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+                    ctx.fillRect(pipe.x + 20, 0, 20, pipe.topHeight);
+                    ctx.fillRect(pipe.x + 20, pipe.bottomY, 20, GROUND_Y - pipe.bottomY);
+                });
+            }
+
+            function drawModePortal(pipe) {
+                const centerX = pipe.x + PIPE_WIDTH / 2;
+                const centerY = pipe.topHeight + PIPE_GAP / 2;
+                ctx.save();
+                ctx.shadowColor = '#FFF';
+                ctx.shadowBlur = 20;
+                ctx.fillStyle = gameMode === 'ufo' ? '#FF9800' : '#2196F3';
+                ctx.beginPath();
+                ctx.ellipse(centerX, centerY, 70, PIPE_GAP / 2 - 10, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 40px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(gameMode === 'ufo' ? 'W' : 'U', centerX, centerY + 15);
+                ctx.restore();
+            }
+
+            function drawSpeedPortal(pipe) {
+                const centerX = pipe.x + PIPE_WIDTH / 2;
+                const centerY = pipe.topHeight + PIPE_GAP / 2;
+                let color, label;
+                switch (pipe.speedPortal.type) {
+                    case '1': color = '#FFFFFF'; label = '1'; break;
+                    case '2': color = '#FFEB3B'; label = '2'; break;
+                    case '3': color = '#FF5722'; label = '3'; break;
+                    case '-1': color = '#03A9F4'; label = '-1'; break;
+                }
+                ctx.save();
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 15;
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.ellipse(centerX, centerY, 70, PIPE_GAP / 2 - 10, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 50px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(label, centerX, centerY + 17);
+                ctx.restore();
+            }
+
+            function drawGround() {
+                const groundGradient = ctx.createLinearGradient(0, GROUND_Y, 0, LOGICAL_HEIGHT);
+                groundGradient.addColorStop(0, '#8B5A2B');
+                groundGradient.addColorStop(0.5, '#6B4226');
+                groundGradient.addColorStop(1, '#4A2F1B');
+                ctx.fillStyle = groundGradient;
+                ctx.fillRect(0, GROUND_Y, LOGICAL_WIDTH, GROUND_HEIGHT);
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(0, GROUND_Y, LOGICAL_WIDTH, 12);
+                ctx.fillStyle = '#388E3C';
+                for (let i = 0; i < LOGICAL_WIDTH; i += 30) {
+                    const offset = (i + groundOffset) % 60;
+                    ctx.fillRect(i - offset, GROUND_Y - 4, 15, 8);
+                }
+                // Камни убраны
+            }
+
+            function drawPlayer() {
+                // Трейл рисуем до трансляции
+                if (gameMode === 'wave' && waveTrail.length > 1) {
+                    ctx.save();
+                    ctx.strokeStyle = trailColor;
+                    ctx.lineWidth = trailWidth;
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(waveTrail[0].x, waveTrail[0].y);
+                    for (let i = 1; i < waveTrail.length; i++) {
+                        ctx.lineTo(waveTrail[i].x, waveTrail[i].y);
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                }
+
+                ctx.save();
+                ctx.translate(BIRD_X, birdY);
+
+                if (gameMode === 'ufo') {
+                    const bodyGradient = ctx.createRadialGradient(-8, -8, 10, 0, 0, BIRD_RADIUS + 5);
+                    bodyGradient.addColorStop(0, '#FFE082');
+                    bodyGradient.addColorStop(0.7, ufoColor);
+                    bodyGradient.addColorStop(1, '#F57C00');
+                    ctx.fillStyle = bodyGradient;
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, BIRD_RADIUS, BIRD_RADIUS * 0.9, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                    ctx.beginPath();
+                    ctx.arc(-5, -12, 12, 0, Math.PI, true);
+                    ctx.fill();
+                    ctx.strokeStyle = '#555';
+                    ctx.lineWidth = 5;
+                    ctx.beginPath();
+                    ctx.moveTo(5, -22);
+                    ctx.lineTo(20, -40);
+                    ctx.stroke();
+                    ctx.fillStyle = '#f00';
+                    ctx.beginPath();
+                    ctx.arc(20, -40, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#FFF';
+                    ctx.beginPath();
+                    ctx.arc(15, -12, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#000';
+                    ctx.beginPath();
+                    ctx.arc(18, -12, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    ctx.rotate(waveAngle);
+                    const gradient = ctx.createLinearGradient(-BIRD_RADIUS, 0, BIRD_RADIUS, 0);
+                    gradient.addColorStop(0, waveColor);
+                    gradient.addColorStop(1, '#0D47A1');
+                    ctx.fillStyle = gradient;
+                    ctx.beginPath();
+                    ctx.moveTo(BIRD_RADIUS, 0);
+                    ctx.lineTo(-BIRD_RADIUS, -BIRD_RADIUS * 0.8);
+                    ctx.lineTo(-BIRD_RADIUS, BIRD_RADIUS * 0.8);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.fillStyle = '#FFF';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#000';
+                    ctx.beginPath();
+                    ctx.arc(3, 0, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+
+            function drawScore() {
+                ctx.save();
+                ctx.font = 'bold 60px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#FFFFFF';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 10;
+                ctx.fillText(`Счёт: ${score}`, LOGICAL_WIDTH / 2, 120);
+                ctx.font = '30px Arial';
+                ctx.fillText(`Рекорд: ${bestScore}`, LOGICAL_WIDTH / 2, 180);
+                ctx.restore();
+            }
+
+            function drawModeIndicator() {
+                ctx.save();
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 40px Arial';
+                ctx.fillStyle = '#FFF';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 8;
+                ctx.fillText(gameMode === 'ufo' ? 'UFO MODE' : 'WAVE MODE', LOGICAL_WIDTH / 2, 250);
+                ctx.restore();
+            }
+
+            function drawModeMessage() {
+                if (modeMessage && messageTimer > 0) {
+                    ctx.save();
+                    ctx.textAlign = 'center';
+                    ctx.font = 'bold 80px Arial';
+                    ctx.fillStyle = '#FFFF00';
+                    ctx.shadowColor = '#000';
+                    ctx.shadowBlur = 20;
+                    ctx.fillText(modeMessage, LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2 - 200);
+                    ctx.restore();
+                }
+            }
+
+            function drawPauseButton() {
+                ctx.save();
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(pauseButton.x, pauseButton.y, pauseButton.width, pauseButton.height);
+                ctx.fillStyle = '#FFF';
+                if (gameState === 'playing') {
+                    ctx.fillRect(pauseButton.x + 20, pauseButton.y + 20, 10, 30);
+                    ctx.fillRect(pauseButton.x + 40, pauseButton.y + 20, 10, 30);
+                } else {
+                    ctx.beginPath();
+                    ctx.moveTo(pauseButton.x + 25, pauseButton.y + 20);
+                    ctx.lineTo(pauseButton.x + 25, pauseButton.y + 50);
+                    ctx.lineTo(pauseButton.x + 50, pauseButton.y + 35);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+
+            function drawMenu() {
+                drawSky();
+                drawClouds();
+                drawGround();
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#FFF';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 15;
+                ctx.font = 'bold 100px Arial';
+                ctx.fillText('ВЫБЕРИ РЕЖИМ', LOGICAL_WIDTH / 2, 300);
+
+                const btnWidth = 500;
+                const btnHeight = 100;
+                const startY = 450;
+                const gap = 120;
+                const btnX = LOGICAL_WIDTH / 2 - btnWidth / 2;
+
+                const buttons = [
+                    { label: 'CLASSIC MODE', y: startY, action: 'classic' },
+                    { label: 'UFO ONLY', y: startY + gap, action: 'ufo' },
+                    { label: 'WAVE ONLY', y: startY + gap * 2, action: 'wave' }
+                ];
+                buttons.forEach(btn => {
+                    ctx.fillStyle = '#4CAF50';
+                    ctx.fillRect(btnX, btn.y, btnWidth, btnHeight);
+                    ctx.fillStyle = '#FFF';
+                    ctx.font = 'bold 40px Arial';
+                    ctx.fillText(btn.label, LOGICAL_WIDTH / 2, btn.y + btnHeight / 2 + 15);
+                });
+
+                const diffY = startY + gap * 3 + 20;
+                const diffBtnWidth = 200;
+                const diffGap = 30;
+                const diffTotalWidth = diffBtnWidth * 3 + diffGap * 2;
+                const diffStartX = LOGICAL_WIDTH / 2 - diffTotalWidth / 2;
+                const diffs = [
+                    { label: 'ЛЕГКО', value: 'easy' },
+                    { label: 'НОРМА', value: 'normal' },
+                    { label: 'СЛОЖНО', value: 'hard' }
+                ];
+                diffs.forEach((d, i) => {
+                    const x = diffStartX + i * (diffBtnWidth + diffGap);
+                    ctx.fillStyle = difficulty === d.value ? '#FF9800' : '#4CAF50';
+                    ctx.fillRect(x, diffY, diffBtnWidth, 70);
+                    ctx.fillStyle = '#FFF';
+                    ctx.font = 'bold 25px Arial';
+                    ctx.fillText(d.label, x + diffBtnWidth / 2, diffY + 45);
+                });
+
+                ctx.fillStyle = '#2196F3';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 250, diffY + 150, 500, 80);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 40px Arial';
+                ctx.fillText('НАСТРОЙКИ', LOGICAL_WIDTH / 2, diffY + 205);
+                ctx.shadowBlur = 0;
+            }
+
+            function drawSettings() {
+                drawSky();
+                drawClouds();
+                drawGround();
+                ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#FFF';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 15;
+                ctx.font = 'bold 80px Arial';
+                ctx.fillText('НАСТРОЙКИ', LOGICAL_WIDTH / 2, 200);
+
+                const sliderWidth = 600;
+                const sliderHeight = 60;
+                const sliderX = LOGICAL_WIDTH / 2 - sliderWidth / 2;
+
+                // Слайдер гравитации
+                const sliderY1 = 380;
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 30px Arial';
+                ctx.fillText(`Гравитация UFO: ${customGravity.toFixed(2)}`, LOGICAL_WIDTH / 2, sliderY1 - 20);
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(sliderX, sliderY1, sliderWidth, sliderHeight);
+                const gravPercent = (customGravity - 0.01) / (0.5 - 0.01);
+                ctx.fillStyle = '#FF9800';
+                ctx.beginPath();
+                ctx.arc(sliderX + gravPercent * sliderWidth, sliderY1 + sliderHeight / 2, 25, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Слайдер силы прыжка
+                const sliderY2 = 480;
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 30px Arial';
+                ctx.fillText(`Сила прыжка UFO: ${Math.abs(customJumpStrength).toFixed(1)}`, LOGICAL_WIDTH / 2, sliderY2 - 20);
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(sliderX, sliderY2, sliderWidth, sliderHeight);
+                const jumpPercent = (Math.abs(customJumpStrength) - 1) / (10 - 1);
+                ctx.fillStyle = '#FF9800';
+                ctx.beginPath();
+                ctx.arc(sliderX + jumpPercent * sliderWidth, sliderY2 + sliderHeight / 2, 25, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Слайдер ширины трейла
+                const sliderY3 = 580;
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 30px Arial';
+                ctx.fillText(`Ширина трейла: ${trailWidth}`, LOGICAL_WIDTH / 2, sliderY3 - 20);
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(sliderX, sliderY3, sliderWidth, sliderHeight);
+                const trailPercent = (trailWidth - 4) / (40 - 4);
+                ctx.fillStyle = '#FF9800';
+                ctx.beginPath();
+                ctx.arc(sliderX + trailPercent * sliderWidth, sliderY3 + sliderHeight / 2, 25, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Кнопки цветов
+                const colorBtnY = 680;
+                const colorBtnWidth = 250;
+                const colorBtnHeight = 60;
+                const colorGap = 40;
+                const colorStartX = LOGICAL_WIDTH / 2 - (colorBtnWidth * 3 + colorGap * 2) / 2;
+
+                ctx.fillStyle = ufoColor;
+                ctx.fillRect(colorStartX, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.strokeStyle = '#FFF';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(colorStartX, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 25px Arial';
+                ctx.fillText('UFO', colorStartX + colorBtnWidth / 2, colorBtnY + 40);
+
+                ctx.fillStyle = waveColor;
+                ctx.fillRect(colorStartX + colorBtnWidth + colorGap, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.strokeStyle = '#FFF';
+                ctx.strokeRect(colorStartX + colorBtnWidth + colorGap, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('WAVE', colorStartX + colorBtnWidth + colorGap + colorBtnWidth / 2, colorBtnY + 40);
+
+                ctx.fillStyle = trailColor;
+                ctx.fillRect(colorStartX + (colorBtnWidth + colorGap) * 2, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.strokeStyle = '#FFF';
+                ctx.strokeRect(colorStartX + (colorBtnWidth + colorGap) * 2, colorBtnY, colorBtnWidth, colorBtnHeight);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('TRAIL', colorStartX + (colorBtnWidth + colorGap) * 2 + colorBtnWidth / 2, colorBtnY + 40);
+
+                // Звук и вибрация
+                const btnY = 780;
+                const btnWidth = 350;
+                const btnHeight = 70;
+                const btnGap = 50;
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - btnWidth - btnGap, btnY, btnWidth, btnHeight);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 30px Arial';
+                ctx.fillText(`ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`, LOGICAL_WIDTH / 2 - btnWidth / 2 - btnGap, btnY + btnHeight / 2 + 10);
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(LOGICAL_WIDTH / 2 + btnGap / 2, btnY, btnWidth, btnHeight);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText(`ВИБРАЦИЯ: ${vibrationEnabled ? 'ВКЛ' : 'ВЫКЛ'}`, LOGICAL_WIDTH / 2 + btnGap / 2 + btnWidth / 2, btnY + btnHeight / 2 + 10);
+
+                // Сброс рекорда
+                ctx.fillStyle = '#F44336';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 200, 880, 400, 60);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('СБРОСИТЬ РЕКОРД', LOGICAL_WIDTH / 2, 920);
+
+                // Назад
+                ctx.fillStyle = '#2196F3';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 200, 960, 400, 70);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('НАЗАД', LOGICAL_WIDTH / 2, 1005);
+                ctx.shadowBlur = 0;
+            }
+
+            function drawPause() {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#FFF';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 20;
+                ctx.font = 'bold 100px Arial';
+                ctx.fillText('ПАУЗА', LOGICAL_WIDTH / 2, 350);
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 250, 550, 500, 80);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 40px Arial';
+                ctx.fillText('ПРОДОЛЖИТЬ', LOGICAL_WIDTH / 2, 605);
+
+                ctx.fillStyle = '#2196F3';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 250, 680, 500, 80);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('ГЛАВНОЕ МЕНЮ', LOGICAL_WIDTH / 2, 735);
+                ctx.shadowBlur = 0;
+            }
+
+            function drawGameOver() {
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+                ctx.textAlign = 'center';
+                ctx.shadowColor = '#000';
+                ctx.shadowBlur = 15;
+                ctx.fillStyle = '#FF5252';
+                ctx.font = 'bold 120px Arial';
+                ctx.fillText('ИГРА ОКОНЧЕНА', LOGICAL_WIDTH / 2, 350);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 60px Arial';
+                ctx.fillText(`Счёт: ${score}`, LOGICAL_WIDTH / 2, 500);
+                ctx.fillText(`Рекорд: ${bestScore}`, LOGICAL_WIDTH / 2, 580);
+                if (score >= bestScore && score > 0) {
+                    ctx.fillStyle = '#FFD700';
+                    ctx.fillText('НОВЫЙ РЕКОРД!', LOGICAL_WIDTH / 2, 660);
+                }
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 250, 750, 500, 80);
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 40px Arial';
+                ctx.fillText('ИГРАТЬ', LOGICAL_WIDTH / 2, 805);
+
+                ctx.fillStyle = '#2196F3';
+                ctx.fillRect(LOGICAL_WIDTH / 2 - 250, 880, 500, 80);
+                ctx.fillStyle = '#FFF';
+                ctx.fillText('ГЛАВНОЕ МЕНЮ', LOGICAL_WIDTH / 2, 935);
+                ctx.shadowBlur = 0;
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+                if (gameState === 'menu') {
+                    drawMenu();
+                    return;
+                }
+                if (gameState === 'settings') {
+                    drawSettings();
+                    return;
+                }
+                drawSky();
+                drawClouds();
+                drawPipes();
+                drawGround();
+                drawPlayer();
+                drawScore();
+                drawModeIndicator();
+                drawModeMessage();
+
+                if (gameState === 'playing' || gameState === 'paused') {
+                    drawPauseButton();
+                }
+
+                if (gameState === 'paused') drawPause();
+                if (gameState === 'gameover') drawGameOver();
+            }
+
+            // ---------- ОБРАБОТКА ВВОДА ----------
+            function getLogicalCoords(clientX, clientY) {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = LOGICAL_WIDTH / rect.width;
+                const scaleY = LOGICAL_HEIGHT / rect.height;
+                return {
+                    x: (clientX - rect.left) * scaleX,
+                    y: (clientY - rect.top) * scaleY
+                };
+            }
+
+            function handlePointerDown(clientX, clientY) {
+                const { x, y } = getLogicalCoords(clientX, clientY);
+
+                // Проверка кнопки паузы (для playing и paused)
+                if ((gameState === 'playing' || gameState === 'paused') &&
+                    x >= pauseButton.x && x <= pauseButton.x + pauseButton.width &&
+                    y >= pauseButton.y && y <= pauseButton.y + pauseButton.height) {
+                    if (gameState === 'playing') {
+                        gameState = 'paused';
+                    } else {
+                        gameState = 'playing';
+                    }
+                    return;
+                }
+
+                if (gameState === 'menu') {
+                    const btnWidth = 500;
+                    const btnHeight = 100;
+                    const startY = 450;
+                    const gap = 120;
+                    const btnX = LOGICAL_WIDTH / 2 - btnWidth / 2;
+
+                    // Кнопки режимов
+                    const buttons = [
+                        { label: 'CLASSIC MODE', y: startY, action: 'classic' },
+                        { label: 'UFO ONLY', y: startY + gap, action: 'ufo' },
+                        { label: 'WAVE ONLY', y: startY + gap * 2, action: 'wave' }
+                    ];
+                    for (const btn of buttons) {
+                        if (x >= btnX && x <= btnX + btnWidth && y >= btn.y && y <= btn.y + btnHeight) {
+                            selectedMode = btn.action;
+                            resetGame();
+                            return;
+                        }
+                    }
+
+                    // Сложность
+                    const diffY = startY + gap * 3 + 20;
+                    const diffBtnWidth = 200;
+                    const diffGap = 30;
+                    const diffTotalWidth = diffBtnWidth * 3 + diffGap * 2;
+                    const diffStartX = LOGICAL_WIDTH / 2 - diffTotalWidth / 2;
+                    const diffs = [
+                        { label: 'ЛЕГКО', value: 'easy' },
+                        { label: 'НОРМА', value: 'normal' },
+                        { label: 'СЛОЖНО', value: 'hard' }
+                    ];
+                    for (let i = 0; i < diffs.length; i++) {
+                        const bx = diffStartX + i * (diffBtnWidth + diffGap);
+                        if (x >= bx && x <= bx + diffBtnWidth && y >= diffY && y <= diffY + 70) {
+                            applyDifficulty(diffs[i].value);
+                            return;
+                        }
+                    }
+
+                    // Настройки
+                    if (x >= LOGICAL_WIDTH / 2 - 250 && x <= LOGICAL_WIDTH / 2 + 250 && y >= diffY + 150 && y <= diffY + 230) {
+                        gameState = 'settings';
+                    }
+                } else if (gameState === 'settings') {
+                    const sliderWidth = 600;
+                    const sliderHeight = 60;
+                    const sliderX = LOGICAL_WIDTH / 2 - sliderWidth / 2;
+
+                    // Слайдер гравитации
+                    const sliderY1 = 380;
+                    if (x >= sliderX && x <= sliderX + sliderWidth && y >= sliderY1 && y <= sliderY1 + sliderHeight) {
+                        const percent = (x - sliderX) / sliderWidth;
+                        customGravity = 0.01 + percent * (0.5 - 0.01);
+                        GRAVITY = customGravity;
+                        return;
+                    }
+                    // Слайдер прыжка
+                    const sliderY2 = 480;
+                    if (x >= sliderX && x <= sliderX + sliderWidth && y >= sliderY2 && y <= sliderY2 + sliderHeight) {
+                        const percent = (x - sliderX) / sliderWidth;
+                        const absJump = 1 + percent * (10 - 1);
+                        customJumpStrength = -absJump;
+                        JUMP_STRENGTH = customJumpStrength;
+                        return;
+                    }
+                    // Слайдер ширины трейла
+                    const sliderY3 = 580;
+                    if (x >= sliderX && x <= sliderX + sliderWidth && y >= sliderY3 && y <= sliderY3 + sliderHeight) {
+                        const percent = (x - sliderX) / sliderWidth;
+                        trailWidth = Math.round(4 + percent * (40 - 4));
+                        return;
+                    }
+
+                    // Кнопки цветов
+                    const colorBtnY = 680;
+                    const colorBtnWidth = 250;
+                    const colorBtnHeight = 60;
+                    const colorGap = 40;
+                    const colorStartX = LOGICAL_WIDTH / 2 - (colorBtnWidth * 3 + colorGap * 2) / 2;
+
+                    if (x >= colorStartX && x <= colorStartX + colorBtnWidth && y >= colorBtnY && y <= colorBtnY + colorBtnHeight) {
+                        colorIndexUfo = (colorIndexUfo + 1) % COLOR_PALETTE.length;
+                        ufoColor = COLOR_PALETTE[colorIndexUfo];
+                        return;
+                    }
+                    if (x >= colorStartX + colorBtnWidth + colorGap && x <= colorStartX + colorBtnWidth + colorGap + colorBtnWidth && y >= colorBtnY && y <= colorBtnY + colorBtnHeight) {
+                        colorIndexWave = (colorIndexWave + 1) % COLOR_PALETTE.length;
+                        waveColor = COLOR_PALETTE[colorIndexWave];
+                        return;
+                    }
+                    if (x >= colorStartX + (colorBtnWidth + colorGap) * 2 && x <= colorStartX + (colorBtnWidth + colorGap) * 2 + colorBtnWidth && y >= colorBtnY && y <= colorBtnY + colorBtnHeight) {
+                        colorIndexTrail = (colorIndexTrail + 1) % COLOR_PALETTE.length;
+                        trailColor = COLOR_PALETTE[colorIndexTrail];
+                        return;
+                    }
+
+                    // Звук и вибрация
+                    const btnY = 780;
+                    const btnWidth = 350;
+                    const btnHeight = 70;
+                    const btnGap = 50;
+
+                    if (x >= LOGICAL_WIDTH / 2 - btnWidth - btnGap && x <= LOGICAL_WIDTH / 2 - btnGap && y >= btnY && y <= btnY + btnHeight) {
+                        soundEnabled = !soundEnabled;
+                        return;
+                    }
+                    if (x >= LOGICAL_WIDTH / 2 + btnGap / 2 && x <= LOGICAL_WIDTH / 2 + btnGap / 2 + btnWidth && y >= btnY && y <= btnY + btnHeight) {
+                        vibrationEnabled = !vibrationEnabled;
+                        return;
+                    }
+
+                    // Сброс рекорда
+                    if (x >= LOGICAL_WIDTH / 2 - 200 && x <= LOGICAL_WIDTH / 2 + 200 && y >= 880 && y <= 940) {
+                        bestScore = 0;
+                        localStorage.setItem('bestScore', '0');
+                        return;
+                    }
+
+                    // Назад
+                    if (x >= LOGICAL_WIDTH / 2 - 200 && x <= LOGICAL_WIDTH / 2 + 200 && y >= 960 && y <= 1030) {
+                        gameState = 'menu';
+                    }
+                } else if (gameState === 'gameover') {
+                    // Кнопка Играть
+                    if (x >= LOGICAL_WIDTH / 2 - 250 && x <= LOGICAL_WIDTH / 2 + 250 && y >= 750 && y <= 830) {
+                        resetGame();
+                        return;
+                    }
+                    // Кнопка Главное меню
+                    if (x >= LOGICAL_WIDTH / 2 - 250 && x <= LOGICAL_WIDTH / 2 + 250 && y >= 880 && y <= 960) {
+                        gameState = 'menu';
+                        return;
+                    }
+                } else if (gameState === 'paused') {
+                    // Кнопка Продолжить
+                    if (x >= LOGICAL_WIDTH / 2 - 250 && x <= LOGICAL_WIDTH / 2 + 250 && y >= 550 && y <= 630) {
+                        gameState = 'playing';
+                        return;
+                    }
+                    // Кнопка Главное меню
+                    if (x >= LOGICAL_WIDTH / 2 - 250 && x <= LOGICAL_WIDTH / 2 + 250 && y >= 680 && y <= 760) {
+                        gameState = 'menu';
+                        return;
+                    }
+                } else if (gameState === 'playing') {
+                    jumpUfo();
+                    if (gameMode === 'wave') setHolding(true);
+                }
+            }
+
+            function handlePointerUp() {
+                setHolding(false);
+            }
+
+            function jumpUfo() {
+                if (gameState === 'playing' && gameMode === 'ufo') {
+                    birdVelocity = JUMP_STRENGTH;
+                    playSound(500, 0.05, 'sine');
+                }
+            }
+
+            function setHolding(hold) {
+                isHolding = hold;
+            }
+
+            canvas.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                handlePointerDown(e.clientX, e.clientY);
+            });
+            canvas.addEventListener('pointerup', (e) => {
+                e.preventDefault();
+                handlePointerUp();
+            });
+            canvas.addEventListener('pointercancel', () => handlePointerUp());
+
+            document.addEventListener('keydown', (e) => {
+                if (e.code === 'Space' || e.code === 'ArrowUp') {
+                    e.preventDefault();
+                    if (gameState === 'menu') {
+                        selectedMode = 'classic';
+                        resetGame();
+                    } else if (gameState === 'settings') {
+                        gameState = 'menu';
+                    } else if (gameState === 'gameover') {
+                        resetGame();
+                    } else if (gameState === 'playing') {
+                        jumpUfo();
+                        if (gameMode === 'wave') setHolding(true);
+                    }
+                }
+                if (e.code === 'KeyP' || e.code === 'Escape') {
+                    e.preventDefault();
+                    if (gameState === 'playing') {
+                        gameState = 'paused';
+                    } else if (gameState === 'paused') {
+                        gameState = 'playing';
+                    }
+                }
+            });
+            document.addEventListener('keyup', (e) => {
+                if (e.code === 'Space' || e.code === 'ArrowUp') {
+                    e.preventDefault();
+                    setHolding(false);
+                }
+            });
+
+            // Игровой цикл
+            function gameLoop() {
+                update();
+                draw();
+                requestAnimationFrame(gameLoop);
+            }
+            gameLoop();
+        })();
+    </script>
+</body>
+</html>
